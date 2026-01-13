@@ -1,4 +1,4 @@
-import { App, Notice, Plugin, PluginSettingTab, Setting, TFile, normalizePath, requestUrl, Menu } from 'obsidian';
+import { App, Menu, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, normalizePath, requestUrl } from 'obsidian';
 import path from 'path';
 import { promises as fs } from 'fs';
 import { shell } from 'electron';
@@ -40,6 +40,46 @@ const DEFAULT_SETTINGS: ExportSettings = {
     overwriteExisting: true,
     openAfterExport: true
 };
+
+class ProgressModal extends Modal {
+    private messageEl: HTMLElement;
+    private barEl: HTMLProgressElement;
+    private titleText: string;
+
+    constructor(app: App, title: string) {
+        super(app);
+        this.titleText = title;
+    }
+
+    onOpen(): void {
+        const { contentEl } = this;
+        contentEl.empty();
+        contentEl.createEl('h3', { text: this.titleText });
+        this.barEl = contentEl.createEl('progress');
+        this.barEl.max = 100;
+        this.barEl.value = 0;
+        this.barEl.style.width = '100%';
+        this.barEl.style.marginBottom = '8px';
+        this.messageEl = contentEl.createEl('div', { text: '' });
+    }
+
+    onClose(): void {
+        this.contentEl.empty();
+    }
+
+    setMessage(message: string): void {
+        if (this.messageEl) {
+            this.messageEl.setText(message);
+        }
+    }
+
+    setProgress(percent: number): void {
+        if (this.barEl) {
+            const bounded = Math.min(100, Math.max(0, percent));
+            this.barEl.value = bounded;
+        }
+    }
+}
 
 export default class ExportWithImageUploadPlugin extends Plugin {
     settings: ExportSettings;
@@ -215,12 +255,13 @@ export default class ExportWithImageUploadPlugin extends Plugin {
         return this.parseUploadResult(data);
     }
 
-    private async processContent(content: string, file: TFile): Promise<string> {
+    private async processContent(content: string, file: TFile, progress?: ProgressModal): Promise<string> {
         let updated = content;
         const images = this.collectImages(content, file);
         const locals = images.filter(img => img.isLocal && img.absPath);
         if (locals.length) {
-            new Notice(`上传图片中 (${locals.length})...`, 2000);
+            progress?.setMessage(`上传图片中 (${locals.length})...`);
+            progress?.setProgress(25);
             const uploadUrls = await this.uploadFiles(locals.map(i => i.absPath!));
             if (uploadUrls.length !== locals.length) {
                 new Notice('图片上传数量与返回不一致，部分保持本地链接');
@@ -230,6 +271,8 @@ export default class ExportWithImageUploadPlugin extends Plugin {
                     item.finalUrl = uploadUrls[index];
                 }
             });
+            progress?.setMessage('图片上传完成，正在替换链接...');
+            progress?.setProgress(40);
         }
         images.forEach(item => {
             const targetUrl = item.finalUrl || item.originalLink;
@@ -237,34 +280,54 @@ export default class ExportWithImageUploadPlugin extends Plugin {
             updated = updated.replace(item.match, replacement);
         });
         updated = this.convertWikiLinks(updated);
+        progress?.setMessage('链接替换完成');
+        progress?.setProgress(50);
         return updated;
     }
 
     private async exportNote(file: TFile) {
-        const startNotice = new Notice('开始导出并上传图片...', 3000);
+        const progress = new ProgressModal(this.app, '正在导出...');
+        progress.open();
+        progress.setMessage('读取文件内容...');
+        progress.setProgress(10);
         try {
             const content = await this.app.vault.cachedRead(file);
             const sanitizedName = this.sanitizeName(file.basename);
             const exportDir = normalizePath(path.posix.join(this.settings.exportRoot, sanitizedName));
+            progress.setMessage('准备导出目录...');
+            progress.setProgress(15);
             await this.ensureFolder(exportDir);
             const targetName = `${sanitizedName}.md`;
             const exportPath = normalizePath(path.posix.join(exportDir, targetName));
             const exists = await this.app.vault.adapter.exists(exportPath);
             if (exists && !this.settings.overwriteExisting) {
                 new Notice('目标文件已存在，未覆盖');
+                progress.setMessage('导出已取消：目标存在');
+                progress.setProgress(100);
+                progress.close();
                 return;
             }
-            const processed = await this.processContent(content, file);
+            progress.setMessage('处理内容与上传图片...');
+            progress.setProgress(20);
+            const processed = await this.processContent(content, file, progress);
+            progress.setMessage('写入导出文件...');
+            progress.setProgress(70);
             await this.app.vault.adapter.write(exportPath, processed);
             if (this.settings.openAfterExport) {
+                progress.setMessage('打开导出位置...');
+                progress.setProgress(85);
                 shell.showItemInFolder(this.toAbsolute(exportPath));
             }
+            progress.setMessage('完成');
+            progress.setProgress(100);
             new Notice(`导出成功：${exportPath}`);
         } catch (error) {
             console.error(error);
+            progress.setMessage('导出失败');
+            progress.setProgress(100);
             new Notice(`导出失败：${(error as Error).message}`);
         } finally {
-            startNotice.hide();
+            progress.close();
         }
     }
 
