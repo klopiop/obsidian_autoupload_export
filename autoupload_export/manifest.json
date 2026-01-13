@@ -1,0 +1,10 @@
+{
+  "id": "autoupload——export",
+  "name": "Export with Image Upload",
+  "version": "0.1.0",
+  "minAppVersion": "1.6.3",
+  "description": "Export the active note to a per-note folder in standard Markdown and upload images to an image host (PicGo-compatible).",
+  "author": "Combined Plugin",
+  "authorUrl": "",
+  "isDesktopOnly": true
+}
